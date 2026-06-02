@@ -1,0 +1,47 @@
+# dependencies
+/node_modules
+/.pnp
+.pnp.js
+
+# testing
+/coverage
+
+# next.js
+/.next/
+/out/
+
+# production
+/build
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# local env files
+.env*.local
+
+# vercel
+.vercel
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+
+# local databases and uploads
+db.json
+public/uploads/
+*.mp3
+chrome-debug-profile/
+chrome-stdout.log
+chrome-stderr.log
+e2e-output.mp3
+test-node-edge-tts.mp3
+
+# test scripts
+/list-models.js
+/test-*.js
+/groq.js
+/groq.json
+/mock-lm-studio.js
