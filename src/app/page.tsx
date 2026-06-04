@@ -246,7 +246,7 @@ export default function LandingPage() {
       const turnUrls: string[] = new Array(totalTurns);
       let nextIdx = 0;
 
-      async function processTurnWorker() {
+      const processTurnWorker = async () => {
         while (nextIdx < totalTurns) {
           const index = nextIdx++;
           const turn = script.turns[index];
