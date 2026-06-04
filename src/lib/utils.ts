@@ -73,6 +73,8 @@ export function getFileTypeIcon(fileName: string): string {
     txt: '📄',
     ppt: '📙',
     pptx: '📙',
+    xls: '📗',
+    xlsx: '📗',
   };
   return iconMap[ext] ?? '📎';
 }

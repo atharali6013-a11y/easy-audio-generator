@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useRef, useState, useCallback, type DragEvent } from 'react';
+import React, { useRef, useState, useCallback, useEffect, type DragEvent } from 'react';
 import { formatFileSize, getFileTypeIcon } from '@/lib/utils';
 
 // ─── Props ──────────────────────────────────────────────────────────────────
@@ -13,7 +13,7 @@ interface FileUploadProps {
 
 // ─── Accepted File Types ────────────────────────────────────────────────────
 
-const ACCEPTED_TYPES = '.pdf,.doc,.docx,.txt,.ppt,.pptx';
+const ACCEPTED_TYPES = '.pdf,.doc,.docx,.txt,.ppt,.pptx,.xls,.xlsx';
 const ACCEPTED_MIME_TYPES = new Set([
   'application/pdf',
   'application/msword',
@@ -21,6 +21,8 @@ const ACCEPTED_MIME_TYPES = new Set([
   'text/plain',
   'application/vnd.ms-powerpoint',
   'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  'application/vnd.ms-excel',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
 ]);
 
 // ─── FileUpload Component ───────────────────────────────────────────────────
@@ -31,8 +33,25 @@ export default function FileUpload({
   onRemove,
 }: FileUploadProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const isClickingRef = useRef(false);
+  const justFocusedRef = useRef(false);
   const [isDragActive, setIsDragActive] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Set lock when window regains focus to ignore trailing double-click hits
+  useEffect(() => {
+    const handleWindowFocus = () => {
+      justFocusedRef.current = true;
+      const timer = setTimeout(() => {
+        justFocusedRef.current = false;
+      }, 500);
+      return () => clearTimeout(timer);
+    };
+    window.addEventListener('focus', handleWindowFocus);
+    return () => {
+      window.removeEventListener('focus', handleWindowFocus);
+    };
+  }, []);
 
   // Validate file type
   const validateFile = useCallback((file: File): boolean => {
@@ -99,9 +118,14 @@ export default function FileUpload({
     [handleFile]
   );
 
-  // Open file picker
+  // Open file picker with a lock to prevent double-click issues
   const openFilePicker = useCallback(() => {
+    if (isClickingRef.current || justFocusedRef.current) return;
+    isClickingRef.current = true;
     fileInputRef.current?.click();
+    setTimeout(() => {
+      isClickingRef.current = false;
+    }, 1000);
   }, []);
 
   // Handle keyboard activation on the drop zone
@@ -200,7 +224,7 @@ export default function FileUpload({
               : 'border-purple-500/30 hover:border-purple-400/50 hover:bg-white/[0.02]'
           }
         `}
-        aria-label="Upload document. Drag and drop or click to browse. Accepted formats: PDF, DOC, DOCX, TXT, PPT, PPTX"
+        aria-label="Upload document. Drag and drop or click to browse. Accepted formats: PDF, DOC, DOCX, TXT, PPT, PPTX, XLS, XLSX"
       >
         {/* Upload icon */}
         <div
@@ -242,7 +266,7 @@ export default function FileUpload({
             : 'Drag & drop or click to browse'}
         </p>
         <p className="mt-3 text-xs text-gray-500">
-          Supports PDF, DOC, DOCX, TXT, PPT, PPTX
+          Supports PDF, DOC, DOCX, TXT, PPT, PPTX, XLS, XLSX
         </p>
 
         {/* Animated border glow on drag */}

@@ -1,6 +1,8 @@
 import { createClient } from '@supabase/supabase-js';
 import fs from 'fs';
 import path from 'path';
+import crypto from 'crypto';
+import { verifyToken as verifyFirebaseToken, isAdminLocalMode } from '@/lib/firebase-admin';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -317,12 +319,165 @@ export async function getAudioByShareId(shareId: string): Promise<AudioMeta | nu
 }
 
 // ---------------------------------------------------------------------------
+// Debug Logs Operations
+// ---------------------------------------------------------------------------
+
+export interface DebugLog {
+  id: string;
+  userId?: string;
+  timestamp: Date | string;
+  stage?: string;
+  message: string;
+  stack?: string;
+  context?: any;
+}
+
+function mapDebugLogToDb(log: DebugLog) {
+  return {
+    id: log.id,
+    user_id: log.userId || null,
+    timestamp: typeof log.timestamp === 'string' ? log.timestamp : (log.timestamp || new Date()).toISOString(),
+    stage: log.stage || null,
+    message: log.message,
+    stack: log.stack || null,
+    context: log.context || null
+  };
+}
+
+function mapDbToDebugLog(row: any): DebugLog | null {
+  if (!row) return null;
+  return {
+    id: row.id,
+    userId: row.user_id,
+    timestamp: new Date(row.timestamp),
+    stage: row.stage,
+    message: row.message,
+    stack: row.stack,
+    context: row.context
+  };
+}
+
+export async function saveDebugLog(log: Omit<DebugLog, 'id' | 'timestamp'> & { id?: string; timestamp?: Date | string }): Promise<void> {
+  const finalLog: DebugLog = {
+    id: log.id || crypto.randomUUID(),
+    timestamp: log.timestamp || new Date(),
+    userId: log.userId,
+    stage: log.stage,
+    message: log.message,
+    stack: log.stack,
+    context: log.context
+  };
+
+  try {
+    let savedInSupabase = false;
+    if (isSupabaseConfigured && supabase) {
+      const dbRow = mapDebugLogToDb(finalLog);
+      const { error } = await supabase.from('debug_logs').upsert(dbRow);
+      if (!error) {
+        savedInSupabase = true;
+      } else if (error.code === 'PGRST205' || error.message?.includes('schema cache')) {
+        // Table doesn't exist — fall back to jobs table with prefix key
+        console.warn('[db-client] debug_logs table not found, using jobs table fallback');
+        const ts = typeof finalLog.timestamp === 'string' ? finalLog.timestamp : finalLog.timestamp.toISOString();
+        const jobsRow = {
+          id: `_log_${finalLog.id}`,
+          stage: finalLog.stage || 'client',
+          percent: 0,
+          message: finalLog.message,
+          error: finalLog.stack || null,
+          audio: { user_id: finalLog.userId, timestamp: ts, context: finalLog.context, stack: finalLog.stack },
+          updated_at: ts,
+        };
+        const { error: jobsErr } = await supabase.from('jobs').upsert(jobsRow);
+        if (!jobsErr) {
+          savedInSupabase = true;
+        } else {
+          console.warn('[db-client] jobs fallback for debug_logs also failed:', jobsErr.message);
+        }
+      } else {
+        console.warn('[db-client] Supabase debug_logs save failed, falling back to local:', error.message);
+      }
+    }
+    
+    if (!savedInSupabase) {
+      loadLocalDb();
+      if (!localDbStore.debug_logs) localDbStore.debug_logs = {};
+      localDbStore.debug_logs[finalLog.id] = {
+        ...finalLog,
+        timestamp: typeof finalLog.timestamp === 'string' ? finalLog.timestamp : finalLog.timestamp.toISOString(),
+      };
+      saveLocalDb();
+    }
+  } catch (err) {
+    console.error('[db-client] Exception in saveDebugLog:', err);
+  }
+}
+
+export async function getDebugLogs(limit = 100): Promise<DebugLog[]> {
+  try {
+    if (isSupabaseConfigured && supabase) {
+      // Try debug_logs table first
+      const { data, error } = await supabase
+        .from('debug_logs')
+        .select('*')
+        .order('timestamp', { ascending: false })
+        .limit(limit);
+      if (!error) {
+        return (data || []).map(row => mapDbToDebugLog(row)).filter((l): l is DebugLog => l !== null);
+      }
+      
+      if (error.code === 'PGRST205' || error.message?.includes('schema cache')) {
+        // Table doesn't exist — read from jobs table with prefix key
+        console.warn('[db-client] debug_logs table not found, using jobs table fallback');
+        const { data: jobsData, error: jobsErr } = await supabase
+          .from('jobs')
+          .select('*')
+          .like('id', '_log_%')
+          .order('updated_at', { ascending: false })
+          .limit(limit);
+        if (!jobsErr && jobsData) {
+          return jobsData.map((row: any) => {
+            const payload = row.audio || {};
+            return {
+              id: row.id.replace('_log_', ''),
+              userId: payload.user_id || null,
+              timestamp: new Date(payload.timestamp || row.updated_at),
+              stage: row.stage,
+              message: row.message,
+              stack: payload.stack || row.error || null,
+              context: payload.context || null,
+            } as DebugLog;
+          });
+        }
+      }
+      console.warn('[db-client] Supabase getDebugLogs failed, falling back to local:', error.message);
+    }
+    
+    loadLocalDb();
+    const logs = Object.values(localDbStore.debug_logs || {}) as any[];
+    return logs
+      .map(log => ({
+        ...log,
+        timestamp: new Date(log.timestamp)
+      }))
+      .sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime())
+      .slice(0, limit);
+  } catch (err) {
+    console.error('[db-client] Exception in getDebugLogs:', err);
+    return [];
+  }
+}
+
+// ---------------------------------------------------------------------------
 // 24-Hour Auto-Cleanup Operation
 // ---------------------------------------------------------------------------
 
 export async function cleanupOldData(): Promise<void> {
   const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000); // 24 hours ago
   const cutoffIso = cutoff.toISOString();
+  
+  const cutoffLog = new Date(Date.now() - 48 * 60 * 60 * 1000); // 48 hours ago for debug logs
+  const cutoffLogIso = cutoffLog.toISOString();
 
   console.log(`[db-client] Running auto-cleanup for entries older than 24 hours (before ${cutoffIso})`);
 
@@ -349,13 +504,14 @@ export async function cleanupOldData(): Promise<void> {
         }
       }
 
-      // 2. Delete database rows older than 24 hours
+      // 2. Delete database rows older than 24 hours (logs 48h)
       const { error: dbDocErr } = await supabase.from('documents').delete().lt('uploaded_at', cutoffIso);
       const { error: dbJobErr } = await supabase.from('jobs').delete().lt('updated_at', cutoffIso);
       const { error: dbAudioErr } = await supabase.from('audios').delete().lt('generated_at', cutoffIso);
+      const { error: dbLogErr } = await supabase.from('debug_logs').delete().lt('timestamp', cutoffLogIso);
 
-      if (dbDocErr || dbJobErr || dbAudioErr) {
-        console.error('[db-client] Cleanup: DB deletion errors:', { dbDocErr, dbJobErr, dbAudioErr });
+      if (dbDocErr || dbJobErr || dbAudioErr || dbLogErr) {
+        console.error('[db-client] Cleanup: DB deletion errors:', { dbDocErr, dbJobErr, dbAudioErr, dbLogErr });
       } else {
         console.log('[db-client] Cleanup completed successfully on Supabase.');
       }
@@ -367,10 +523,12 @@ export async function cleanupOldData(): Promise<void> {
     loadLocalDb();
     const now = Date.now();
     const oneDayMs = 24 * 60 * 60 * 1000;
+    const twoDaysMs = 48 * 60 * 60 * 1000;
 
     let deletedDocs = 0;
     let deletedJobs = 0;
     let deletedAudios = 0;
+    let deletedLogs = 0;
 
     // Clean documents
     if (localDbStore.documents) {
@@ -392,6 +550,16 @@ export async function cleanupOldData(): Promise<void> {
       }
     }
 
+    // Clean debug logs
+    if (localDbStore.debug_logs) {
+      for (const [id, log] of Object.entries(localDbStore.debug_logs)) {
+        if (now - new Date(log.timestamp).getTime() > twoDaysMs) {
+          delete localDbStore.debug_logs[id];
+          deletedLogs++;
+        }
+      }
+    }
+
     // Clean audios and delete their local files
     if (localDbStore.audios) {
       for (const [id, audio] of Object.entries(localDbStore.audios)) {
@@ -403,25 +571,119 @@ export async function cleanupOldData(): Promise<void> {
           const filePath = path.join(process.cwd(), 'public', 'uploads', `${id}.mp3`);
           if (fs.existsSync(filePath)) {
             try {
-              fs.unlinkSync(filePath);
-              console.log(`[db-client] Cleanup: Deleted local file ${filePath}`);
+               fs.unlinkSync(filePath);
+               console.log(`[db-client] Cleanup: Deleted local file ${filePath}`);
             } catch (err) {
-              console.error(`[db-client] Cleanup: Failed to delete local file ${filePath}:`, err);
+               console.error(`[db-client] Cleanup: Failed to delete local file ${filePath}:`, err);
             }
           }
         }
       }
     }
 
-    if (deletedDocs > 0 || deletedJobs > 0 || deletedAudios > 0) {
-      console.log(`[db-client] Cleanup: Deleted local entries: ${deletedDocs} docs, ${deletedJobs} jobs, ${deletedAudios} audios.`);
+    if (deletedDocs > 0 || deletedJobs > 0 || deletedAudios > 0 || deletedLogs > 0) {
+      console.log(`[db-client] Cleanup: Deleted local entries: ${deletedDocs} docs, ${deletedJobs} jobs, ${deletedAudios} audios, ${deletedLogs} logs.`);
       saveLocalDb();
     }
   }
 }
 
 // ---------------------------------------------------------------------------
-// Authentication Verification Helper (Guest mode by default)
+// User Profiles Operations
+// ---------------------------------------------------------------------------
+
+export async function saveUser(user: { id: string; email: string; name: string }): Promise<void> {
+  const dbRow = {
+    id: user.id,
+    email: user.email,
+    name: user.name,
+    last_seen_at: new Date().toISOString(),
+    created_at: new Date().toISOString(),
+  };
+
+  try {
+    let savedInSupabase = false;
+    if (isSupabaseConfigured && supabase) {
+      // Try users table first
+      const { error } = await supabase.from('users').upsert(dbRow, { onConflict: 'id' });
+      if (!error) {
+        savedInSupabase = true;
+      } else if (error.code === 'PGRST205' || error.message?.includes('schema cache')) {
+        // Table doesn't exist — fall back to jobs table with prefix key
+        console.warn('[db-client] users table not found, using jobs table fallback');
+        const jobsRow = {
+          id: `_user_${user.id}`,
+          stage: 'user_profile',
+          percent: 0,
+          message: `${user.name} <${user.email}>`,
+          audio: dbRow,
+          updated_at: new Date().toISOString(),
+        };
+        const { error: jobsErr } = await supabase.from('jobs').upsert(jobsRow);
+        if (!jobsErr) {
+          savedInSupabase = true;
+        } else {
+          console.warn('[db-client] jobs fallback for users also failed:', jobsErr.message);
+        }
+      } else {
+        console.warn('[db-client] Supabase users upsert failed, falling back to local:', error.message);
+      }
+    }
+    
+    if (!savedInSupabase) {
+      loadLocalDb();
+      if (!localDbStore.users) localDbStore.users = {};
+      const existing = localDbStore.users[user.id] || {};
+      localDbStore.users[user.id] = {
+        ...existing,
+        ...dbRow,
+        created_at: existing.created_at || dbRow.created_at,
+      };
+      saveLocalDb();
+    }
+  } catch (err) {
+    console.error('[db-client] Exception in saveUser:', err);
+  }
+}
+
+export async function getUsersList(): Promise<any[]> {
+  try {
+    if (isSupabaseConfigured && supabase) {
+      // Try users table first
+      const { data, error } = await supabase
+        .from('users')
+        .select('*')
+        .order('last_seen_at', { ascending: false });
+      if (!error) {
+        return data || [];
+      }
+      
+      if (error.code === 'PGRST205' || error.message?.includes('schema cache')) {
+        // Table doesn't exist — read from jobs table with prefix key
+        console.warn('[db-client] users table not found, using jobs table fallback');
+        const { data: jobsData, error: jobsErr } = await supabase
+          .from('jobs')
+          .select('*')
+          .like('id', '_user_%')
+          .order('updated_at', { ascending: false });
+        if (!jobsErr && jobsData) {
+          return jobsData.map((row: any) => row.audio || {}).filter((u: any) => u.id);
+        }
+      }
+      console.warn('[db-client] Supabase getUsersList failed, falling back to local:', error.message);
+    }
+    
+    loadLocalDb();
+    const users = Object.values(localDbStore.users || {});
+    return users.sort((a: any, b: any) => new Date(b.last_seen_at).getTime() - new Date(a.last_seen_at).getTime());
+  } catch (err) {
+    console.error('[db-client] Exception in getUsersList:', err);
+    return [];
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Authentication Verification Helper
 // ---------------------------------------------------------------------------
 
 export async function verifyToken(token: string): Promise<VerifiedUser> {
@@ -429,11 +691,37 @@ export async function verifyToken(token: string): Promise<VerifiedUser> {
     throw new Error('No authentication token provided');
   }
 
-  return {
-    uid: 'guest-ali-athar',
-    name: 'Mr. Ali Athar',
-    email: 'ali.athar@guest.interface',
-  };
+  // Check if it's a mock token for local offline testing
+  if (token.startsWith('mock-google-token-')) {
+    const mockEmail = token.replace('mock-google-token-', '');
+    const user = {
+      uid: `mock-uid-${mockEmail}`,
+      email: mockEmail,
+      name: mockEmail.split('@')[0],
+    };
+    await saveUser({ id: user.uid, email: user.email, name: user.name }).catch(console.error);
+    return user;
+  }
+
+  // Call the Firebase admin verification
+  try {
+    const verified = await verifyFirebaseToken(token);
+    // Save/update user profile in DB
+    await saveUser({ id: verified.uid, email: verified.email || '', name: verified.name || 'User' }).catch(console.error);
+    return verified;
+  } catch (err: any) {
+    // Fallback to guest if offline local mode or guest token
+    if (isAdminLocalMode || token === 'guest-token-id' || token === 'dummy-token-for-testing') {
+      const user = {
+        uid: 'guest-ali-athar',
+        email: 'ali.athar@guest.interface',
+        name: 'Mr. Ali Athar',
+      };
+      await saveUser({ id: user.uid, email: user.email, name: user.name }).catch(console.error);
+      return user;
+    }
+    throw err;
+  }
 }
 
 export async function verifyRequest(request: Request): Promise<VerifiedUser> {

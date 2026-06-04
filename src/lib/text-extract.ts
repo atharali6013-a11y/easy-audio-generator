@@ -5,6 +5,7 @@
 // No character limits — returns the full extracted text.
 
 import path from 'path';
+import os from 'os';
 import type { SupportedExtension } from '@/types';
 
 // ---------------------------------------------------------------------------
@@ -34,7 +35,7 @@ export async function extractText(
 
     case '.docx':
     case '.doc':
-      rawText = await extractFromWord(buffer);
+      rawText = await extractFromWord(buffer, ext);
       break;
 
     case '.txt':
@@ -43,13 +44,18 @@ export async function extractText(
 
     case '.ppt':
     case '.pptx':
-      rawText = await extractFromPowerPoint(buffer);
+      rawText = await extractFromPowerPoint(buffer, ext);
+      break;
+
+    case '.xlsx':
+    case '.xls':
+      rawText = await extractFromExcel(buffer, ext);
       break;
 
     default:
       throw new Error(
         `Unsupported file format: "${ext}". ` +
-          'Supported formats: PDF, DOCX, DOC, TXT, PPT, PPTX'
+          'Supported formats: PDF, DOCX, DOC, TXT, PPT, PPTX, XLSX, XLS'
       );
   }
 
@@ -86,7 +92,14 @@ async function extractFromPdf(buffer: Buffer): Promise<string> {
   }
 }
 
-async function extractFromWord(buffer: Buffer): Promise<string> {
+async function extractFromWord(buffer: Buffer, ext: string): Promise<string> {
+  if (ext === '.doc') {
+    throw new Error(
+      'Older Word binary document format (.doc) is not supported. ' +
+        'Please save the file as a modern Word document (.docx) or PDF first, then upload it.'
+    );
+  }
+
   const mammoth = await import('mammoth');
 
   try {
@@ -112,15 +125,45 @@ function extractFromTxt(buffer: Buffer): string {
   return buffer.toString('utf-8');
 }
 
-async function extractFromPowerPoint(buffer: Buffer): Promise<string> {
+async function extractFromPowerPoint(buffer: Buffer, ext: string): Promise<string> {
+  if (ext === '.ppt') {
+    throw new Error(
+      'Older PowerPoint binary format (.ppt) is not supported. ' +
+        'Please save the file as a modern PowerPoint presentation (.pptx) or PDF first, then upload it.'
+    );
+  }
+
   const officeparser = await import('officeparser');
 
   try {
-    const text = await officeparser.parseOfficeAsync(buffer);
+    const text = await officeparser.parseOfficeAsync(buffer, {
+      tempFilesLocation: os.tmpdir(),
+    } as any);
     return text || '';
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     throw new Error(`PowerPoint extraction failed: ${msg}`);
+  }
+}
+
+async function extractFromExcel(buffer: Buffer, ext: string): Promise<string> {
+  if (ext === '.xls') {
+    throw new Error(
+      'Older Excel binary format (.xls) is not supported. ' +
+        'Please save the file as a modern Excel spreadsheet (.xlsx) or PDF first, then upload it.'
+    );
+  }
+
+  const officeparser = await import('officeparser');
+
+  try {
+    const text = await officeparser.parseOfficeAsync(buffer, {
+      tempFilesLocation: os.tmpdir(),
+    } as any);
+    return text || '';
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    throw new Error(`Excel extraction failed: ${msg}`);
   }
 }
 

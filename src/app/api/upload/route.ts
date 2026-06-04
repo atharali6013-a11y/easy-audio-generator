@@ -1,18 +1,20 @@
 import { NextRequest, NextResponse } from 'next/server';
 import crypto from 'crypto';
-import { verifyRequest, saveDocument, cleanupOldData } from '@/lib/db-client';
+import { verifyRequest, saveDocument, cleanupOldData, saveDebugLog } from '@/lib/db-client';
 import { extractText } from '@/lib/text-extract';
 
 export const maxDuration = 60; // Max 60 seconds duration for extraction
 
 export async function POST(request: NextRequest) {
+  let user: any = null;
+  let file: File | null = null;
   try {
     // 1. Authenticate user
-    const user = await verifyRequest(request);
+    user = await verifyRequest(request);
 
     // 2. Parse multi-part form data
     const formData = await request.formData();
-    const file = formData.get('file') as File | null;
+    file = formData.get('file') as File | null;
 
     if (!file) {
       return NextResponse.json({ error: 'No file uploaded' }, { status: 400 });
@@ -59,8 +61,18 @@ export async function POST(request: NextRequest) {
     });
   } catch (error) {
     console.error('[api/upload] Error:', error);
+    const errorMsg = error instanceof Error ? error.message : 'Failed to process document';
+    
+    await saveDebugLog({
+      userId: user?.uid || 'guest',
+      stage: 'extracting',
+      message: `[api/upload] ${errorMsg}`,
+      stack: error instanceof Error ? error.stack : undefined,
+      context: { fileName: file ? file.name : 'unknown', fileSize: file ? file.size : 0 }
+    }).catch(console.error);
+
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : 'Failed to process document' },
+      { error: errorMsg },
       { status: 500 }
     );
   }

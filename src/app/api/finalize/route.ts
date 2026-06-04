@@ -1,22 +1,13 @@
-// ============================================
-// Easy Audio Generator — TTS Integration (Microsoft Edge TTS + Mock Fallback)
-// ============================================
-
-import { EdgeTTS } from 'node-edge-tts';
-import type { ConversationScript } from '@/types';
-import fs from 'fs';
-import os from 'os';
-import path from 'path';
+import { NextRequest, NextResponse } from 'next/server';
 import crypto from 'crypto';
+import fs from 'fs';
+import path from 'path';
+import { verifyRequest, saveJob, saveAudio, getDocument, saveDebugLog } from '@/lib/db-client';
+import { uploadAudio } from '@/lib/storage';
 
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
+export const maxDuration = 120; // Safe timeout for finalization
 
-const VOICE_HOST = 'ur-PK-UzmaNeural'; // Female voice for Host
-const VOICE_EXPERT = 'ur-PK-AsadNeural'; // Male voice for Expert
-
-// A tiny silent MP3 buffer chunk (~0.3 seconds at 24khz 48kbps mono)
+// Silent MP3 frame chunk (~0.3 seconds)
 const SILENT_MP3_B64 = 
   '//NkxHwAAANIAAAAAKqqqqqqqqpMQU1FMy4xMDCqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq//NkxHwAAANIAAAAAKqqqqqqqqpMQU1FMy4xMDCqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq//NkxHwAAANIAAAAAKqqqqqqqqpMQU1FMy4xMDCqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq//NkxHwAAANIAAAAAKqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq';
 
@@ -32,67 +23,137 @@ function getSilenceBuffer(ms: number): Buffer {
   return Buffer.concat(chunks);
 }
 
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
-
-export async function synthesizeSpeech(
-  text: string,
-  voiceRole: 'host' | 'expert'
-): Promise<Buffer> {
-  const voice = voiceRole === 'expert' ? VOICE_EXPERT : VOICE_HOST;
-  const maxAttempts = 3;
-  let lastError: any = null;
-
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const tempFilePath = path.join(os.tmpdir(), `tts-${crypto.randomUUID()}.mp3`);
-    try {
-      const tts = new EdgeTTS({
-        voice: voice,
-        lang: 'ur-PK',
-        outputFormat: 'audio-24khz-48kbitrate-mono-mp3'
-      });
-
-      const ttsPromise = tts.ttsPromise(text, tempFilePath);
-      
-      // Add a 30 second hard timeout for TTS generation to prevent infinite hanging
-      let timer: NodeJS.Timeout;
-      const timeoutPromise = new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error('Edge TTS timed out after 30s')), 30000);
-      });
-      
-      await Promise.race([ttsPromise, timeoutPromise]).finally(() => clearTimeout(timer));
-      
-      const buffer = await fs.promises.readFile(tempFilePath);
-      await fs.promises.unlink(tempFilePath).catch(console.error);
-      return buffer;
-    } catch (error) {
-      lastError = error;
-      console.warn(`[tts] Speech synthesis attempt ${attempt}/${maxAttempts} failed:`, error instanceof Error ? error.message : error);
-      await fs.promises.unlink(tempFilePath).catch(() => {});
-      
-      if (attempt < maxAttempts) {
-        // Wait with exponential backoff + random jitter
-        const delay = 1000 * Math.pow(2, attempt - 1) + Math.random() * 1000;
-        await new Promise(resolve => setTimeout(resolve, delay));
-      }
-    }
+async function getBufferFromUrl(url: string): Promise<Buffer> {
+  if (url.startsWith('http://') || url.startsWith('https://')) {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`Failed to fetch turn audio from ${url}`);
+    const arrayBuffer = await res.arrayBuffer();
+    return Buffer.from(arrayBuffer);
+  } else {
+    // Local relative URL fallback
+    const cleanPath = url.startsWith('/') ? url.slice(1) : url;
+    const fullPath = path.join(process.cwd(), 'public', cleanPath);
+    return fs.promises.readFile(fullPath);
   }
-
-  throw new Error(`Edge TTS synthesis failed after ${maxAttempts} attempts. Reason: ${lastError?.message || lastError}`);
 }
 
-/**
- * Merge multiple MP3 files into a single MP3 file safely using FFmpeg.
- * We specifically RE-ENCODE the audio to rebuild the MP3 Xing/Info frames.
- * If we don't re-encode, browsers will halt playback early because the concatenated 
- * stream will contain invalid duration metadata headers from the first chunk.
- */
-async function mergeMp3Files(inputPaths: string[], outputPath: string) {
-  const buffers = await Promise.all(inputPaths.map(p => fs.promises.readFile(p)));
-  const strippedBuffers = buffers.map(buf => stripId3AndXing(buf));
-  const mergedBuffer = Buffer.concat(strippedBuffers);
-  await fs.promises.writeFile(outputPath, mergedBuffer);
+export async function POST(request: NextRequest) {
+  let jobId = '';
+  let documentId = '';
+  let turnUrls: any[] = [];
+  let user: any = null;
+  try {
+    // 1. Authenticate user
+    user = await verifyRequest(request);
+
+    // 2. Parse request body
+    const body = await request.json();
+    const { jobId: reqJobId, documentId: reqDocId, title, turnUrls: reqTurnUrls, turnSpeakers } = body;
+    jobId = reqJobId;
+    documentId = reqDocId;
+    turnUrls = reqTurnUrls;
+
+    if (!jobId || !documentId || !title || !turnUrls || !turnSpeakers || turnUrls.length !== turnSpeakers.length) {
+      return NextResponse.json({ error: 'Missing or mismatched required parameters' }, { status: 400 });
+    }
+
+    console.log(`[api/finalize] Merging ${turnUrls.length} turns for job ${jobId}`);
+
+    // Update job to uploading progress
+    await saveJob({
+      id: jobId,
+      stage: 'uploading',
+      percent: 85,
+      message: 'Downloading and concatenating audio turns...',
+      updatedAt: new Date()
+    });
+
+    // 3. Download all turn audio buffers
+    const turnBuffers = await Promise.all(turnUrls.map((url: string) => getBufferFromUrl(url)));
+
+    // 4. Interleave turn buffers with natural silent gaps (no FFmpeg needed)
+    const finalChunks: Buffer[] = [];
+    for (let i = 0; i < turnBuffers.length; i++) {
+      finalChunks.push(stripId3AndXing(turnBuffers[i]));
+
+      // Add silence between turns
+      if (i < turnBuffers.length - 1) {
+        const currentSpeaker = turnSpeakers[i];
+        const nextSpeaker = turnSpeakers[i + 1];
+        const silenceDuration = currentSpeaker === nextSpeaker ? 500 : 800;
+        finalChunks.push(stripId3AndXing(getSilenceBuffer(silenceDuration)));
+      }
+    }
+
+    const mergedBuffer = Buffer.concat(finalChunks);
+
+    await saveJob({
+      id: jobId,
+      stage: 'uploading',
+      percent: 90,
+      message: 'Uploading merged podcast to cloud storage...',
+      updatedAt: new Date()
+    });
+
+    // 5. Upload final merged MP3 to storage
+    const audioId = crypto.randomUUID();
+    const shareId = crypto.randomBytes(6).toString('hex');
+    const storageKey = `audios/${audioId}.mp3`;
+
+    const downloadUrl = await uploadAudio(mergedBuffer, storageKey);
+
+    // 6. Retrieve document and save final audio metadata
+    const docData = await getDocument(documentId);
+    const fileName = docData ? docData.fileName : 'podcast.pdf';
+
+    const audioMeta = {
+      id: audioId,
+      shareId,
+      userId: user.uid,
+      fileName,
+      downloadUrl,
+      title,
+      generatedAt: new Date(),
+    };
+
+    await saveAudio(audioMeta);
+
+    // 7. Update job state to complete
+    await saveJob({
+      id: jobId,
+      stage: 'complete',
+      percent: 100,
+      message: 'Audio Overview ready!',
+      audio: audioMeta,
+      updatedAt: new Date()
+    });
+
+    console.log(`[api/finalize] Job ${jobId} finalized successfully. URL: ${downloadUrl}`);
+    return NextResponse.json(audioMeta);
+  } catch (error) {
+    console.error(`[api/finalize] Error finalizing job ${jobId}:`, error);
+    const errorMsg = error instanceof Error ? error.message : 'Finalization failed';
+    
+    await saveDebugLog({
+      userId: user?.uid || 'guest',
+      stage: 'uploading',
+      message: `[api/finalize] ${errorMsg}`,
+      stack: error instanceof Error ? error.stack : undefined,
+      context: { jobId, documentId, turnUrlsCount: turnUrls?.length }
+    }).catch(console.error);
+
+    if (jobId) {
+      await saveJob({
+        id: jobId,
+        stage: 'error',
+        percent: 0,
+        message: errorMsg,
+        error: errorMsg,
+        updatedAt: new Date()
+      }).catch(e => console.error('Failed to update job error state:', e));
+    }
+    return NextResponse.json({ error: errorMsg }, { status: 500 });
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -220,63 +281,3 @@ function stripId3AndXing(buffer: Buffer): Buffer {
   return audioBuffer;
 }
 
-
-/**
- * Generate a complete MP3 podcast audio from a script.
- */
-export async function generateFullAudio(
-  script: ConversationScript,
-  onProgress?: (percent: number) => void
-): Promise<Buffer> {
-  console.log(`[tts] Starting audio generation for script with ${script.turns.length} turns`);
-
-  const tempFiles: string[] = [];
-  const totalTurns = script.turns.length;
-
-  try {
-    for (let i = 0; i < totalTurns; i++) {
-      const turn = script.turns[i];
-      console.log(`[tts] Synthesizing turn ${i + 1}/${totalTurns} (${turn.speaker}): ${turn.text.slice(0, 30)}...`);
-
-      const speechBuffer = await synthesizeSpeech(turn.text, turn.speaker);
-      
-      const speechFile = path.join(os.tmpdir(), `tts-speech-${crypto.randomUUID()}.mp3`);
-      await fs.promises.writeFile(speechFile, speechBuffer);
-      tempFiles.push(speechFile);
-
-      // Add silence between turns
-      if (i < totalTurns - 1) {
-        const nextTurn = script.turns[i + 1];
-        const silenceDuration = turn.speaker === nextTurn.speaker ? 500 : 800;
-        
-        const silenceFile = path.join(os.tmpdir(), `tts-silence-${crypto.randomUUID()}.mp3`);
-        await fs.promises.writeFile(silenceFile, getSilenceBuffer(silenceDuration));
-        tempFiles.push(silenceFile);
-      }
-
-      // Add a small delay between requests to prevent hammering the Microsoft Edge endpoint
-      await new Promise(resolve => setTimeout(resolve, 300));
-
-      if (onProgress) {
-        const percent = Math.round(((i + 1) / totalTurns) * 100);
-        onProgress(percent);
-      }
-    }
-
-    console.log('[tts] Concatenating and RE-ENCODING audio parts with ffmpeg');
-    const outputFilePath = path.join(os.tmpdir(), `tts-final-${crypto.randomUUID()}.mp3`);
-    
-    await mergeMp3Files(tempFiles, outputFilePath);
-    const finalBuffer = await fs.promises.readFile(outputFilePath);
-    
-    // Cleanup
-    await Promise.all([...tempFiles, outputFilePath].map(f => fs.promises.unlink(f).catch(() => {})));
-    
-    return finalBuffer;
-  } catch (err) {
-    console.warn(`[tts] Edge TTS synthesis failed. Throwing error upstream.`, err);
-    // Clean up temporary files
-    await Promise.all(tempFiles.map(f => fs.promises.unlink(f).catch(() => {})));
-    throw new Error('Audio generation failed. The Microsoft TTS service might be busy or rate-limiting. Please try again.');
-  }
-}

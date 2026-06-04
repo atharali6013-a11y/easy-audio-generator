@@ -61,23 +61,24 @@ export default function ProgressBar({ progress, stage, userName }: ProgressBarPr
 
   return (
     <div className="w-full relative">
-      {/* Visual Container - Hidden from Screen Readers to prevent "blank" reading */}
-      <div className="w-full max-w-2xl mx-auto p-8 rounded-2xl border border-white/10 bg-white/5 backdrop-blur-md shadow-2xl text-center space-y-6" aria-hidden="true">
-        
+      {/* Accessible Container with semantic headings */}
+      <div 
+        className="w-full max-w-2xl mx-auto p-8 rounded-2xl border border-white/10 bg-white/5 backdrop-blur-md shadow-2xl text-center space-y-6"
+      >
         <div className="space-y-4">
-          <h3 className="text-xl font-bold tracking-tight text-white/90 Outfit">
+          <h2 className="text-xl font-bold tracking-tight text-white/90 Outfit">
             Dear {name},
-          </h3>
+          </h2>
           
           {isError ? (
-            <p className="text-lg text-red-400 font-medium tracking-wide flex justify-center items-center gap-2">
+            <h2 className="text-lg text-red-400 font-medium tracking-wide flex justify-center items-center gap-2 font-semibold">
               <span className="text-2xl">{currentStage.icon}</span>
               {currentStage.label}
-            </p>
+            </h2>
           ) : (
-            <p className="text-lg text-purple-300 font-medium tracking-wide">
+            <h2 className="text-lg text-purple-300 font-medium tracking-wide font-normal">
               Please hold on while we generate your audio. This process involves deep cloud AI processing and may take 2 to 3 minutes. 😊
-            </p>
+            </h2>
           )}
           
           {isEarlyStage && (
@@ -95,13 +96,6 @@ export default function ProgressBar({ progress, stage, userName }: ProgressBarPr
             </span>
           </div>
         )}
-      </div>
-
-      {/* Screen Reader Accessibility - This is the ONLY thing the screen reader will see */}
-      <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">
-        {isError 
-          ? `Error: ${currentStage.label}` 
-          : `Please hold on while we generate your audio. This process involves deep cloud AI processing and may take 2 to 3 minutes.`}
       </div>
     </div>
   );

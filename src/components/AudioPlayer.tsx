@@ -89,7 +89,9 @@ export default function AudioPlayer({ audioUrl, title, onShare }: AudioPlayerPro
 
   const downloadAudio = () => {
     const a = document.createElement('a');
-    a.href = audioUrl;
+    // Append download=true query parameter to trigger forced download via backend
+    const urlWithParam = audioUrl.includes('?') ? `${audioUrl}&download=true` : `${audioUrl}?download=true`;
+    a.href = urlWithParam;
     a.download = `${title.replace(/\s+/g, '_') || 'audio_overview'}.mp3`;
     a.target = '_blank';
     document.body.appendChild(a);

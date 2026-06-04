@@ -13,8 +13,11 @@ export async function GET(
     return NextResponse.json({ error: 'Missing audioId' }, { status: 400 });
   }
 
+  const { searchParams } = new URL(request.url);
+  const isDownload = searchParams.get('download') === 'true';
+
   try {
-    console.log(`[api/audio] Fetching audio for ID: ${audioId}`);
+    console.log(`[api/audio] Fetching audio for ID: ${audioId}, download: ${isDownload}`);
 
     const data = await getAudio(audioId);
 
@@ -40,16 +43,56 @@ export async function GET(
       // Read file buffer and return as response
       const buffer = await fs.promises.readFile(filePath);
       
+      const headers: Record<string, string> = {
+        'Content-Type': 'audio/mpeg',
+        'Content-Length': buffer.length.toString(),
+        'Accept-Ranges': 'bytes',
+      };
+
+      if (isDownload) {
+        let downloadFileName = `${audioId}.mp3`;
+        if (data.fileName) {
+          const lastDotIndex = data.fileName.lastIndexOf('.');
+          const baseName = lastDotIndex !== -1 ? data.fileName.substring(0, lastDotIndex) : data.fileName;
+          const cleanBaseName = baseName.replace(/["\\/]/g, '_').trim();
+          downloadFileName = `${cleanBaseName}.mp3`;
+        }
+        headers['Content-Disposition'] = `attachment; filename="${encodeURIComponent(downloadFileName)}"; filename*=UTF-8''${encodeURIComponent(downloadFileName)}`;
+      }
+
+      return new Response(buffer, { headers });
+    }
+
+    // In Cloud mode (Supabase):
+    // If the user requested download, fetch the file from Supabase and serve it with Content-Disposition attachment.
+    // This bypasses same-origin browser download restrictions for cross-origin URLs.
+    if (isDownload) {
+      console.log(`[api/audio] Fetching file from Supabase for forced download: ${data.downloadUrl}`);
+      const response = await fetch(data.downloadUrl);
+      if (!response.ok) {
+        throw new Error(`Failed to fetch audio from Supabase: ${response.statusText}`);
+      }
+      const arrayBuffer = await response.arrayBuffer();
+      const buffer = Buffer.from(arrayBuffer);
+
+      let downloadFileName = `${audioId}.mp3`;
+      if (data.fileName) {
+        const lastDotIndex = data.fileName.lastIndexOf('.');
+        const baseName = lastDotIndex !== -1 ? data.fileName.substring(0, lastDotIndex) : data.fileName;
+        const cleanBaseName = baseName.replace(/["\\/]/g, '_').trim();
+        downloadFileName = `${cleanBaseName}.mp3`;
+      }
+
       return new Response(buffer, {
         headers: {
           'Content-Type': 'audio/mpeg',
+          'Content-Disposition': `attachment; filename="${encodeURIComponent(downloadFileName)}"; filename*=UTF-8''${encodeURIComponent(downloadFileName)}`,
           'Content-Length': buffer.length.toString(),
-          'Accept-Ranges': 'bytes',
         },
       });
     }
 
-    // Redirect directly to the Supabase public download URL in Cloud mode
+    // Otherwise, redirect directly to the Supabase public URL for normal streaming/playback
     return NextResponse.redirect(new URL(data.downloadUrl));
   } catch (error) {
     console.error(`[api/audio] Error retrieving audio:`, error);

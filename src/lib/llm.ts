@@ -44,7 +44,7 @@ You will write dialogue for two speakers:
 - **No Names (STRICT):** The speakers must NEVER introduce themselves or call each other by name. Start with a warm greeting (like "السلام علیکم") and jump directly into the discussion.
 - **Natural & Emotional:** The conversation must feel organic and full of life. Include natural disfluencies, conversational fillers, and emotional cues translated appropriately into conversational Urdu (e.g., "مطلب", "دیکھیں", "اچھا", "ہاں بالکل", "سوچیے ذرا", "واہ!"). 
 - **Expressive Punctuation:** USE EXPRESSIVE PUNCTUATION HEAVILY. Use exclamation marks (!), question marks (؟), and ellipses (...) to indicate pauses, excitement, or contemplation. Edge TTS relies on these for natural intonation.
-- **Deep Dive Analysis:** Act like a premium NotebookLM podcast. Do a complete deep dive into the provided source document. Organically decide the length based on how much detail is needed to cover all the key points comprehensively. Do not arbitrarily limit the length or the number of key points.
+- **Deep Dive Analysis:** Act like a premium NotebookLM podcast. Do a complete, extensive deep dive into the provided source document. Explain all major arguments, key findings, and methodologies in detail. Your transcript MUST be thorough and long—if the document has substantial content, aim to generate a comprehensive conversation of 25 to 40 back-and-forth dialogue turns to ensure no key information is glossed over.
 - **Strictly Source-Based:** Rely EXCLUSIVELY on the provided source document. Do NOT hallucinate or bring in outside information. The document is your ONLY source of truth.
 - **Pronunciation & Script:** Write the Urdu text in a way that is highly phonetic and easy for a text-to-speech (TTS) engine to pronounce correctly. For English terms, DO NOT write them in English letters. Always transliterate them smoothly into Urdu script (e.g., 'انٹرنیٹ' instead of Internet, 'سافٹ ویئر' instead of software) or use common Urdu equivalents. Ensure the sentence structure is simple enough for the TTS to read smoothly without fumbling.
 ### OUTPUT FORMAT AND PROCESS
@@ -149,7 +149,7 @@ async function _callLLMForScript(text: string, provider: 'groq' | 'gemini'): Pro
           'Authorization': `Bearer ${GROQ_API_KEY}`
         },
         body: JSON.stringify({
-          model: 'qwen/qwen3-32b',
+          model: 'qwen-2.5-32b',
           messages: [
             { role: 'system', content: 'You are a highly creative and analytical AI assistant.' },
             { role: 'user', content: prompt }
@@ -181,7 +181,7 @@ async function _callLLMForScript(text: string, provider: 'groq' | 'gemini'): Pro
       // GEMINI PROVIDER
       const genAI = new GoogleGenerativeAI(getGeminiKey());
       const model = genAI.getGenerativeModel({ 
-        model: 'gemini-flash-latest',
+        model: 'gemini-2.5-flash',
         systemInstruction: 'You are a highly creative and analytical AI assistant.'
       });
       

@@ -102,6 +102,9 @@ export const SUPPORTED_EXTENSIONS = [
   '.txt',
   '.ppt',
   '.pptx',
+  '.xlsx',
+  '.xls',
 ] as const;
 
 export type SupportedExtension = (typeof SUPPORTED_EXTENSIONS)[number];
+
